@@ -26,7 +26,7 @@ excel_str = ['data/20240317.xlsx',
              'data/20240331.xlsx']
 
 # Load binary mask outlining Denmark
-mask = np.load('/data/mask.npy')
+mask = np.load('data/mask.npy')
 
 # Allocate memory and load image data
 Xdata = np.zeros((mask.sum(), len(file_name))) # X-variable: The values from the pixels in the images

@@ -10,23 +10,23 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Find all image files
-file_name = glob.glob('D:/02526/processed/17/*natural_color.npy')
-file_name = file_name + glob.glob('D:/02526/processed/18/*natural_color.npy')
-file_name = file_name + glob.glob('D:/02526/processed/19/*natural_color.npy')
-file_name = file_name + glob.glob('D:/02526/processed/26/*natural_color.npy')
-file_name = file_name + glob.glob('D:/02526/processed/29/*natural_color.npy')
-file_name = file_name + glob.glob('D:/02526/processed/31/*natural_color.npy')
+file_name = glob.glob('data/17/*natural_color.npy')
+file_name = file_name + glob.glob('data/18/*natural_color.npy')
+file_name = file_name + glob.glob('data/19/*natural_color.npy')
+file_name = file_name + glob.glob('data/26/*natural_color.npy')
+file_name = file_name + glob.glob('data/29/*natural_color.npy')
+file_name = file_name + glob.glob('data/31/*natural_color.npy')
 
 # Point to production data
-excel_str = ['D:/02526/processed/20240317.xlsx',
-             'D:/02526/processed/20240318.xlsx',
-             'D:/02526/processed/20240319.xlsx',
-             'D:/02526/processed/20240326.xlsx',
-             'D:/02526/processed/20240329.xlsx',
-             'D:/02526/processed/20240331.xlsx']
+excel_str = ['data/20240317.xlsx',
+             'data/20240318.xlsx',
+             'data/20240319.xlsx',
+             'data/20240326.xlsx',
+             'data/20240329.xlsx',
+             'data/20240331.xlsx']
 
 # Load binary mask outlining Denmark
-mask = np.load('D:/02526/processed/mask.npy')
+mask = np.load('/data/mask.npy')
 
 # Allocate memory and load image data
 Xdata = np.zeros((mask.sum(), len(file_name))) # X-variable: The values from the pixels in the images

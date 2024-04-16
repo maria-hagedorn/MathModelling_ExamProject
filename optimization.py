@@ -15,12 +15,13 @@ def loss_function(beta, X, Y, lambdas, Gammas):
     beta1 = beta[:n]
     beta2 = beta[n:]
 
-    loss = sum([(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)).T@(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)) for i in range(len(X))]) + lambdas[0]*beta1.T@Gammas[0]@beta1 + lambdas[1]*beta2.T@Gammas[1]@beta2
+    #loss = sum([(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)).T@(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)) for i in range(len(X))]) + lambdas[0]*beta1.T@Gammas[0]@beta1 + lambdas[1]*beta2.T@Gammas[1]@beta2
+    loss = sum([Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2) for i in range(len(X))]) + lambdas[0]*beta1.T@Gammas[0]@beta1 + lambdas[1]*beta2.T@Gammas[1]@beta2
 
     return loss
 
 
-def train_model(X, Y):
+def train_model(X, Y, loss_function):
 
     n = X[0].shape[2]
 
@@ -29,7 +30,7 @@ def train_model(X, Y):
 
     initial_guess = np.ones(2*n)
 
-    result = minimize(L,
+    result = minimize(loss_function,
                       initial_guess,
                       args=(X, Y, lambdas, Gammas),
                       method='SlSQP')
@@ -132,11 +133,7 @@ class daily_data_structure:
 class model:
     def __init__(self, predictor, loss):
         self.loss = loss
-
-    def predict(X):
-        return predictor(X)
-
-
+        self.predict = predictor
 
 
 # READ AND SAVE DATA

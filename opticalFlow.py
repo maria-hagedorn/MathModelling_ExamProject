@@ -19,9 +19,21 @@ def convert_to_grayscale(image):
     else:
         raise ValueError("Unexpected image format. Expected RGB or grayscale.")
 
-def calculate_optical_flow(prev_image, current_image):
-    """Calculates and returns the optical flow between two images."""
-    return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+def calculate_optical_flow(prev_image, current_image, prev_features=None):
+    """ Calculates and returns the optical flow between two images.
+        
+        prev_features define which method is used to calculate the optical flow.
+    """
+
+    if prev_features is not None:
+        next_features, _, _ = cv2.calcOpticalFlowPyrLK(prev_image, current_image, prev_features, None)
+        return next_features
+    else:
+        return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+
+def detect_features_to_track(image):
+    """Uses goodFeaturesToTrack for feature detection."""
+    return cv2.goodFeaturesToTrack(image, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
 
 base_dir = 'data'
 output_dir = 'data/flows'   # Directory for output flow data
@@ -40,6 +52,7 @@ for day in days:
 
     # Reset the previous image for each day, night period is not considered
     prev_image = None 
+    prev_features = None
 
     for i, file_name in enumerate(image_arrays):
         # Path to the image array file
@@ -55,6 +68,9 @@ for day in days:
             grayscale_image = convert_to_grayscale(nocloud_image)
 
             if prev_image is not None:
+                if prev_features is None:
+                    prev_features = detect_features_to_track(prev_image)
+                    next_features = calculate_optical_flow(prev_image, grayscale_image, prev_features)
                 flow = calculate_optical_flow(prev_image, grayscale_image)
                 flow_file_path = os.path.join(output_dir, f'flow_{day}_{i-1}_{i}')
                 np.save(flow_file_path, flow)

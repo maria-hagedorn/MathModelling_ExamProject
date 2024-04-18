@@ -3,12 +3,26 @@ import cv2
 import matplotlib.pyplot as plt
 import os
 import re
+import pickle
+
+class daily_data_structure:
+    def __init__(self, data):
+        self.data = data
+        self.num_days = len(data)
+
+    def get_day(self, index):
+        return self.data[index]
     
 def apply_nocloud_filter(rgb_image):
     """Applies the NoCloud filter to an RGB image."""
     R, G, B = rgb_image[:, :, 0], rgb_image[:, :, 1], rgb_image[:, :, 2]
     NoCloud = R + G - 2 * B
     return cv2.normalize(NoCloud, None, 0, 255, cv2.NORM_MINMAX)
+
+def apply_denmark_mask(image, mask_path):
+    """Applies the Denmark mask to an image."""
+    mask = np.load(mask_path)
+    return image * mask
 
 def convert_to_grayscale(image):
     """Converts an image to grayscale, checking if it is RGB."""
@@ -19,21 +33,9 @@ def convert_to_grayscale(image):
     else:
         raise ValueError("Unexpected image format. Expected RGB or grayscale.")
 
-def calculate_optical_flow(prev_image, current_image, prev_features=None):
-    """ Calculates and returns the optical flow between two images.
-        
-        prev_features define which method is used to calculate the optical flow.
-    """
-
-    if prev_features is not None:
-        next_features, _, _ = cv2.calcOpticalFlowPyrLK(prev_image, current_image, prev_features, None)
-        return next_features
-    else:
-        return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-
-def detect_features_to_track(image):
-    """Uses goodFeaturesToTrack for feature detection."""
-    return cv2.goodFeaturesToTrack(image, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
+def calculate_optical_flow(prev_image, current_image):
+    """ Calculates and returns the optical flow between two images. """
+    return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 15, 3, 5, 1.2, 0)
 
 base_dir = 'data'
 output_dir = 'data/flows'   # Directory for output flow data
@@ -45,37 +47,52 @@ pattern = re.compile(r"202403\d\d$")
 # List and sort directories of the image folders
 days = [d for d in sorted(os.listdir(base_dir)) if os.path.isdir(os.path.join(base_dir, d)) and pattern.match(d)]
 
-for day in days:
+with open("all_days_data.pkl", "rb") as file:
+    loaded_data = pickle.load(file)
+
+data_optical_flow = []
+for i, day in enumerate(days):
     # Path to the day directory
     day_dir = os.path.join(base_dir, day)
     image_arrays = sorted([f for f in os.listdir(day_dir) if f.endswith('.npy')])
 
-    # Reset the previous image for each day, night period is not considered
+    df = loaded_data.get_day(i)
+    df_copy = df.copy()
+    
+    # Reset the previous image for each day, account for jump between days
     prev_image = None 
-    prev_features = None
+    flow_images = []
 
     for i, file_name in enumerate(image_arrays):
         # Path to the image array file
         image_path = os.path.join(day_dir, file_name)
-        current_image = np.load(image_path)
+        i_image = np.load(image_path)
 
         # Check if the image array is RGB
-        if current_image.ndim == 3 and current_image.shape[2] == 3:
+        if i_image.ndim == 3 and i_image.shape[2] == 3:
             # Apply the NoCloud filter
-            nocloud_image = apply_nocloud_filter(current_image)
+            nocloud_image = apply_nocloud_filter(i_image)
 
             # Convert to grayscale
             grayscale_image = convert_to_grayscale(nocloud_image)
 
-            if prev_image is not None:
-                if prev_features is None:
-                    prev_features = detect_features_to_track(prev_image)
-                    next_features = calculate_optical_flow(prev_image, grayscale_image, prev_features)
-                flow = calculate_optical_flow(prev_image, grayscale_image)
-                flow_file_path = os.path.join(output_dir, f'flow_{day}_{i-1}_{i}')
-                np.save(flow_file_path, flow)
+            # Apply the Denmark mask
+            current_image = apply_denmark_mask(grayscale_image, mask_path)
 
-            prev_image = grayscale_image
+            if prev_image is not None:
+                flow = calculate_optical_flow(prev_image, current_image)
+                flow_images.append(flow)
+            else:
+                flow_images.append(None)
+
+            prev_image = current_image
 
         else:
             print("The loaded array is not in the expected RGB format.")
+
+    df_copy['Image'] = flow_images
+    df_copy.rename(columns={'Image': 'flow_images'}, inplace=True) 
+    data_optical_flow.append(df_copy)
+
+    with open("all_days_flow_data.pkl", "wb") as file:
+        pickle.dump(data_optical_flow, file)

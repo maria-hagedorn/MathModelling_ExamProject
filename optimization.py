@@ -140,14 +140,14 @@ def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_na
 
         initial_guess = np.ones(2 * n)
 
-        print("Training model...")
+        #print("Training model...")
 
         result = minimize(loss_function,
                           initial_guess,
                           args=(X, Y, lambdas, Gammas),
                           method='SLSQP')
 
-        print("Model trained!")
+        #print("Model trained!")
 
         beta = result.x
         optimal_loss = result.fun
@@ -439,20 +439,19 @@ def split_dataframe(df, n):
 
 def cross_validate(get_model, delta, dfs: list, n_splits=1):
 
-    dfs_tmp = []
+    dfs_split = []
 
     for df in dfs:
-        dfs_tmp += split_dataframe(df, n_splits)
+        dfs_split += split_dataframe(df, n_splits)
 
-    dfs = dfs_tmp
     scores = []
 
     print("Calculating cross validation score...")
 
-    for i in tqdm(range(len(dfs))):
-        training_data = dfs.copy()
+    for i in tqdm(range(len(dfs_split))):
+        training_data = dfs_split.copy()
         training_data.pop(i)
-        test_data = dfs[i]
+        test_data = dfs_split[i]
         model = get_model(data=training_data,
                           number_of_timesteps_to_predict=delta,
                           save_to_file=False,
@@ -467,18 +466,17 @@ def cross_validate(get_model, delta, dfs: list, n_splits=1):
 
 def evaluate_overfitting(get_model, delta, dfs: list, n_splits=1):
 
-    dfs_tmp = []
+    dfs_split = []
 
     for df in dfs:
-        dfs_tmp += split_dataframe(df, n_splits)
+        dfs_split += split_dataframe(df, n_splits)
 
-    dfs = dfs_tmp
     scores = []
 
     print("Calculating overfitting score...")
 
-    for i in tqdm(range(len(dfs))):
-        training_data = dfs.copy()
+    for i in tqdm(range(len(dfs_split))):
+        training_data = dfs_split.copy()
         training_data.pop(i)
         model = get_model(data=training_data,
                           number_of_timesteps_to_predict=delta,
@@ -490,6 +488,9 @@ def evaluate_overfitting(get_model, delta, dfs: list, n_splits=1):
             scores.append(score)
 
     cross_validation_score = cross_validate(get_model, delta=delta, dfs=dfs, n_splits=n_splits)
+
+    print("Cross validation score:", cross_validation_score)
+
     overfitting_score = np.mean(scores)/cross_validation_score
 
     return overfitting_score
@@ -522,14 +523,14 @@ def __main__():
 
     data = optical_flow_data.get_days([0])
 
-    cross_validation_score = cross_validate(get_model, delta=2, dfs=data, n_splits=8)
-
-    print("\n\nDONE -------------------------------------\n\n")
+    # cross_validation_score = cross_validate(get_model, delta=2, dfs=data, n_splits=8)
+    #
+    # print("\n\nDONE -------------------------------------\n\n")
 
     overfitting_score = evaluate_overfitting(get_model, delta=2, dfs=data, n_splits=8)
 
 
-    print("Cross validation score:", cross_validation_score)
+    # print("Cross validation score:", cross_validation_score)
     print("Overfitting score:", overfitting_score)
 
 

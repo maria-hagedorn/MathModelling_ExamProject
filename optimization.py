@@ -8,6 +8,7 @@ import pickle
 import tifffile as tiff
 import matplotlib.pyplot as plt
 import cv2
+from tqdm import tqdm
 
 
 def get_training_data(data, delta):
@@ -39,12 +40,35 @@ class model:
 
 
 class multiday_prediction_model:
-    def __init__(self, models):
+    def __init__(self, models, delta):
+        self.delta = delta
         self.models = models
         self.loss = sum([model.loss for model in self.models])
 
     def predict(self, X):
         return np.array([model.predict(X) for model in self.models]).T
+
+    def evaluate(self, df: pd.DataFrame, error_measure):
+
+        X, Y = get_evaluation_data(df, self.delta)
+
+        xs = []
+        ys = []
+
+        for i in range(len(X)):
+
+            prediction = self.predict([X[i]])
+
+            xs += list(prediction[0])
+            ys += Y[i]
+
+        error = error_measure(xs, ys)
+
+        return error
+
+def RMSE(xs, ys):
+    return np.sqrt(sum([(x-y)**2/len(xs) for x, y in zip(xs,ys)]))
+
 
 
 class optical_flow_image:
@@ -147,7 +171,7 @@ def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_na
         models.append(trained_model)
 
 
-    multiday_predictor = multiday_prediction_model(models)
+    multiday_predictor = multiday_prediction_model(models, delta=number_of_timesteps_to_predict)
 
     if save_to_file:
         try:
@@ -375,22 +399,101 @@ def data_to_input_format(data):
     return X
 
 def get_evaluation_data(df, delta):
+
     images = df['flow_images'].tolist()  # Convert the Image column to a list
     power = df['SolarPower'].tolist()  # Convert the Power column to a list
 
     power_slices = []
-    for i in range(len(images)):
+    image_list = []
+
+    for i in range(len(images) - (delta + 1)):
         # Slice the power list from the next index to index + delta
         power_slice = power[i + 1:i + delta + 1]
         power_slices.append(power_slice)
+        image_list.append(images[i])
 
         # Print for checking - testing purposes
         # print(f"Image {i}: {type(images[i])}")
         # print(f"Solar Power for Image {i}: {power_slice}")
         # print(f"Original solar power for image {i}: {power[i+1:i+delta+1]}\n")
 
-    return images, power_slices
+    image_list.pop(0)
+    image_list = [image.to_numpy() for image in image_list]
+    power_slices.pop(0)
+
+    return image_list, power_slices
     # Example usage: images, power = get_evaluation_data(training_data[0], 2)
+
+
+def split_dataframe(df, n):
+    chunk_size = len(df) // n
+    chunks = []
+    for i in range(n):
+        start = i * chunk_size
+        if i == n - 1:
+            chunks.append(df[start:])
+        else:
+            chunks.append(df[start:start + chunk_size])
+    return chunks
+
+
+def cross_validate(get_model, delta, dfs: list, n_splits=1):
+
+    dfs_tmp = []
+
+    for df in dfs:
+        dfs_tmp += split_dataframe(df, n_splits)
+
+    dfs = dfs_tmp
+    scores = []
+
+    print("Calculating cross validation score...")
+
+    for i in tqdm(range(len(dfs))):
+        training_data = dfs.copy()
+        training_data.pop(i)
+        test_data = dfs[i]
+        model = get_model(data=training_data,
+                          number_of_timesteps_to_predict=delta,
+                          save_to_file=False,
+                          model_name=f"{delta}_time_step_model")
+        evaluation_data = get_evaluation_data(test_data, delta=delta)
+        score = model.evaluate(test_data, error_measure=RMSE)
+        scores.append(score)
+
+    cross_validation_score = np.mean(scores)
+
+    return cross_validation_score
+
+def evaluate_overfitting(get_model, delta, dfs: list, n_splits=1):
+
+    dfs_tmp = []
+
+    for df in dfs:
+        dfs_tmp += split_dataframe(df, n_splits)
+
+    dfs = dfs_tmp
+    scores = []
+
+    print("Calculating overfitting score...")
+
+    for i in tqdm(range(len(dfs))):
+        training_data = dfs.copy()
+        training_data.pop(i)
+        model = get_model(data=training_data,
+                          number_of_timesteps_to_predict=delta,
+                          save_to_file=False,
+                          model_name=f"{delta}_time_step_model")
+
+        for df in training_data:
+            score = model.evaluate(df, error_measure=RMSE)
+            scores.append(score)
+
+    cross_validation_score = cross_validate(get_model, delta=delta, dfs=dfs, n_splits=n_splits)
+    overfitting_score = np.mean(scores)/cross_validation_score
+
+    return overfitting_score
+
 
 
 def __main__():
@@ -406,12 +509,31 @@ def __main__():
     training_data = optical_flow_data.get_days([0, 1, 2, 3, 4])
     test_data = optical_flow_data.get_days([5])
 
-    get_model(data=training_data,
-              number_of_timesteps_to_predict=5,
-              save_to_file=True,
-              model_name="five_time_step_model")
+    # get_model(data=training_data,
+    #           number_of_timesteps_to_predict=5,
+    #           save_to_file=True,
+    #           model_name="five_time_step_model")
+
+
+
 
     model = load_object("five_time_step_model.pkl")
+
+
+    data = optical_flow_data.get_days([0])
+
+    cross_validation_score = cross_validate(get_model, delta=2, dfs=data, n_splits=8)
+
+    print("\n\nDONE -------------------------------------\n\n")
+
+    overfitting_score = evaluate_overfitting(get_model, delta=2, dfs=data, n_splits=8)
+
+
+    print("Cross validation score:", cross_validation_score)
+    print("Overfitting score:", overfitting_score)
+
+
+    exit()
 
     dayid = 0
 

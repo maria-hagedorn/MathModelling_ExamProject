@@ -374,6 +374,24 @@ def data_to_input_format(data):
 
     return X
 
+def get_evaluation_data(df, delta):
+    images = df['flow_images'].tolist()  # Convert the Image column to a list
+    power = df['SolarPower'].tolist()  # Convert the Power column to a list
+
+    power_slices = []
+    for i in range(len(images)):
+        # Slice the power list from the next index to index + delta
+        power_slice = power[i + 1:i + delta + 1]
+        power_slices.append(power_slice)
+
+        # Print for checking - testing purposes
+        # print(f"Image {i}: {type(images[i])}")
+        # print(f"Solar Power for Image {i}: {power_slice}")
+        # print(f"Original solar power for image {i}: {power[i+1:i+delta+1]}\n")
+
+    return images, power_slices
+    # Example usage: images, power = get_evaluation_data(training_data[0], 2)
+
 
 def __main__():
 

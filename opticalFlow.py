@@ -56,7 +56,7 @@ for i, day in enumerate(days):
     day_dir = os.path.join(base_dir, day)
     image_arrays = sorted([f for f in os.listdir(day_dir) if f.endswith('.npy')])
 
-    df = loaded_data.get_day(i)
+    df = loaded_data.get_days([i])
     df_copy = df.copy()
     
     # Reset the previous image for each day, account for jump between days

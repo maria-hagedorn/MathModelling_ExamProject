@@ -17,10 +17,10 @@ def get_training_data(data, delta):
     for day in data:
 
         for j in range(day.shape[0] - 1 - delta):
-            optical_flow_image = day["Image"].iloc[j + 1].to_numpy()
+            opt_img = day["flow_images"].iloc[j + 1].to_numpy()
             power_generation = day["SolarPower"].iloc[j + 1 + delta]
 
-            X.append(optical_flow_image)
+            X.append(opt_img)
             Y.append(power_generation)
 
     return X, Y
@@ -33,20 +33,26 @@ class model:
 
     def predict(self, data):
         def f(x):
-            return (x[0, :, :] @ self.betas[0]).T @ (x[1, :, :] @ self.betas[1])
+            return abs((x[:, :, 0] @ self.betas[0]).T @ (x[:, :, 1] @ self.betas[1]))
 
-        images, _ = get_training_data(data, 1)  # Delta doesn't matter here and is arbitrarily set to 1.
-
-        return [f(image) for image in images]
+        return [f(image) for image in data]
 
 
 class multiday_prediction_model:
     def __init__(self, models):
         self.models = models
+        self.loss = sum([model.loss for model in self.models])
 
     def predict(self, X):
-        return np.array([model.predict(X) for model in self.models])
+        return np.array([model.predict(X) for model in self.models]).T
 
+
+class optical_flow_image:
+    def __init__(self, numpy_array):
+        self.numpy = numpy_array
+
+    def to_numpy(self):
+        return self.numpy
 
 
 class daily_data_structure:
@@ -93,26 +99,31 @@ def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_na
             beta2 = beta[n:]
 
             # loss = sum([(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)).T@(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)) for i in range(len(X))]) + lambdas[0]*beta1.T@Gammas[0]@beta1 + lambdas[1]*beta2.T@Gammas[1]@beta2
-            guess = lambda i: (X[i][0, :, :] @ beta1).T @ (X[i][1, :, :] @ beta2)
+
+            guess = lambda i: abs((X[i][:, :, 0] @ beta1).T @ (X[i][:, :, 1] @ beta2))
             correction_term_1 = lambdas[0] * beta1.T @ Gammas[0] @ beta1
             correction_term_2 = lambdas[1] * beta2.T @ Gammas[1] @ beta2
-            error_sum = abs(sum([Y[i] - guess(i) for i in range(len(X))]))
+            error_sum = sum([abs(Y[i] - guess(i)) for i in range(len(X))])/len(X)
 
-            loss = error_sum + correction_term_1 + correction_term_2
+            loss = error_sum #+ correction_term_1 + correction_term_2
 
             return loss
 
-        n = X[0].shape[2]
+        n = X[0].shape[1]
 
         lambdas = [0.5, 0.5]
         Gammas = [np.eye(n), np.eye(n)]
 
         initial_guess = np.ones(2 * n)
 
+        print("Training model...")
+
         result = minimize(loss_function,
                           initial_guess,
                           args=(X, Y, lambdas, Gammas),
-                          method='SlSQP')
+                          method='SLSQP')
+
+        print("Model trained!")
 
         beta = result.x
         optimal_loss = result.fun
@@ -191,8 +202,9 @@ def preprocess_and_save_data(file_name="all_days_data"):
                                                  fill_value=(1 - np.round(1 / (min_val + 0.0001)) * min(min_val, 0)) * (
                                                      min(min_val, 255)), dtype=np.uint8)
 
+                grayscale_image = grayscale_squeezed
                 # Convert the grayscale array back to an image
-                grayscale_image = Image.fromarray(grayscale_squeezed, 'L')
+                # grayscale_image = Image.fromarray(grayscale_squeezed, 'L')
 
                 images_with_date_times.append((grayscale_image, date_time))
 
@@ -227,37 +239,145 @@ def preprocess_and_save_data(file_name="all_days_data"):
     save_object(data, file_name)
 
 
-def transform_data_to_optical_flow(data):
-    class optical_flow_image:
-        def __init__(self, numpy_array):
-            self.numpy = numpy_array
+# def transform_data_to_optical_flow(data):
+#     class optical_flow_image:
+#         def __init__(self, numpy_array):
+#             self.numpy = numpy_array
+#
+#         def to_numpy(self):
+#             return self.numpy
+#
+#     data_optical_flow = []
+#
+#     for i, day in enumerate(data):
+#
+#         data_optical_flow.append(day.copy())
+#
+#         data_optical_flow[i].loc[data_optical_flow[i].index[0], "Image"] = None
+#         data_optical_flow[i].loc[data_optical_flow[i].index[-1], "Image"] = None
+#
+#         for j in range(day.shape[0] - 2):
+#             optical_flow = calculate_optical_flow(np.array(day["Image"].iloc[j]), np.array(day["Image"].iloc[j + 1]))
+#             data_optical_flow[i].loc[data_optical_flow[i].index[j + 1], "Image"] = optical_flow_image(optical_flow)
+#
+#     return data_optical_flow
 
-        def to_numpy(self):
-            return self.numpy
+
+def apply_denmark_mask(image, mask):
+    """Applies the Denmark mask to an image."""
+    return image * mask
+
+
+def transform_data_to_optical_flow(data):
 
     data_optical_flow = []
 
+    mask = np.load("data/mask.npy")
+
     for i, day in enumerate(data):
 
-        data_optical_flow.append(day.copy())
+        day_copy = day.copy()
 
-        data_optical_flow[i].loc[data_optical_flow[i].index[0], "Image"] = None
-        data_optical_flow[i].loc[data_optical_flow[i].index[-1], "Image"] = None
+        # Reset the previous image for each day, account for jump between days
+        prev_image = None
+        flow_images = []
 
-        for j in range(day.shape[0] - 2):
-            optical_flow = calculate_optical_flow(np.array(day["Image"].iloc[j]), np.array(day["Image"].iloc[j + 1]))
-            data_optical_flow[i].loc[data_optical_flow[i].index[j + 1], "Image"] = optical_flow_image(optical_flow)
+        for image in day_copy["Image"].tolist():
+
+            current_image = apply_denmark_mask(image, mask)
+
+            if prev_image is not None:
+
+                flow = calculate_optical_flow(prev_image, current_image)
+                flow_images.append(optical_flow_image(flow))
+
+            else:
+                flow_images.append(None)
+
+            prev_image = current_image
+
+        day_copy['Image'] = flow_images
+        day_copy.rename(columns={'Image': 'flow_images'}, inplace=True)
+        data_optical_flow.append(day_copy)
 
     return data_optical_flow
 
 
 def calculate_optical_flow(prev_image, current_image):
     """ Calculates and returns the optical flow between two images. """
-    return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+    return cv2.calcOpticalFlowFarneback(prev_image, current_image, None, 0.5, 3, 5, 3, 5, 1.2, 0)
+
+
+def display_optical_flow_image(image: optical_flow_image):
+
+    optical_flow = image.to_numpy()
+
+    # Extract the X and Y components of the flow
+    U = optical_flow[:, :, 0]  # X components
+    V = optical_flow[:, :, 1]  # Y components
+
+    # Create a grid of coordinates for the vectors
+    X, Y = np.meshgrid(np.arange(U.shape[1]), np.arange(U.shape[0]))
+
+    # Plot the vector field using quiver
+    plt.figure(figsize=(5, 5))
+    plt.quiver(X, Y, U, V, angles='xy', scale_units='xy', scale=1, color='r')
+    plt.gca().invert_yaxis()  # Invert Y axis to match image coordinates
+    plt.axis('equal')  # Keep the scale of x and y equal
+    plt.title('Optical Flow Field')
+    plt.xlabel('X coordinate')
+    plt.ylabel('Y coordinate')
+    plt.show()
+
+def display_optical_flow_image_as_RGB(image: optical_flow_image):
+    def min_max_scale(arr):
+        # Compute the minimum and maximum values of the array
+        min_val = np.min(arr)
+        max_val = np.max(arr)
+
+        # Apply the Min-Max scaling formula
+        scaled_arr = (arr - min_val) / (max_val - min_val) * 255
+
+        # Convert to integer type suitable for image data
+        scaled_arr = scaled_arr.astype(np.uint8)
+
+        return scaled_arr
+
+    img = image.to_numpy()
+
+    matrix_red = min_max_scale(img[:, :, 0])
+    matrix_gb = min_max_scale(img[:, :, 1])
+
+    # Create an empty RGB image with the same dimensions
+    rgb_image = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.uint8)
+
+    # Assign the red channel
+    rgb_image[:, :, 0] = matrix_red
+
+    # Assign the green and blue channels
+    rgb_image[:, :, 1] = matrix_gb
+    rgb_image[:, :, 2] = matrix_gb
+
+    # Display the RGB image
+    plt.imshow(rgb_image)
+    plt.axis('off')  # Turn off axis numbers and ticks
+    plt.show()
+
+
+def data_to_input_format(data):
+    X = []
+    for day in data:
+
+        for j in range(day.shape[0] - 1):
+            optical_flow_image = day["flow_images"].iloc[j + 1].to_numpy()
+            X.append(optical_flow_image)
+
+    return X
 
 
 def __main__():
-    # preprocess_and_save_data("all_days_data")
+
+    #preprocess_and_save_data("all_days_data")
 
     data = load_object("all_days_data.pkl")
 
@@ -275,11 +395,19 @@ def __main__():
 
     model = load_object("five_time_step_model.pkl")
 
-    predictions = model.predict(test_data)
+    dayid = 0
 
-    print(predictions)
-    print(test_data)
-    print(model.models[0].loss)
+
+    display_optical_flow_image(test_data[dayid]["flow_images"].iloc[1])
+
+    X = data_to_input_format([test_data[dayid].head(2)])
+
+    predictions = model.predict(X)
+
+    print(predictions[0])
+    print("\n------------------\n")
+    print(test_data[dayid]["SolarPower"].iloc[2:2+5].tolist())
+    print("Model loss:", model.models[0].loss)
 
 
 if __name__ == "__main__":

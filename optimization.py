@@ -7,22 +7,32 @@ import re
 import pickle
 import tifffile as tiff
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import cv2
 from tqdm import tqdm
+import time
+
+pd.set_option('display.max_rows', None)  # Set to None to display all rows
+pd.set_option('display.max_columns', None)  # Set to None to display all columns
 
 
 def get_training_data(data, delta):
+
     X = []
     Y = []
 
     for day in data:
 
-        for j in range(day.shape[0] - 1 - delta):
-            opt_img = day["flow_images"].iloc[j + 1].to_numpy()
-            power_generation = day["SolarPower"].iloc[j + 1 + delta]
+        try:
+            for j in range(day.shape[0] - delta):
+                opt_img = day["flow_images"].iloc[j].to_numpy()
+                idx = day.index[j]
+                power_generation = get_nth_power_after_index(day, n=delta, index=idx, power_column_name="SolarPower")
 
-            X.append(opt_img)
-            Y.append(power_generation)
+                X.append(opt_img)
+                Y.append(power_generation)
+        except:
+            pass  # just stop when there is no more data left
 
     return X, Y
 
@@ -32,11 +42,19 @@ class model:
         self.loss = loss
         self.betas = betas
 
-    def predict(self, data):
-        def f(x):
-            return abs((x[:, :, 0] @ self.betas[0]).T @ (x[:, :, 1] @ self.betas[1]))
+    def predict(self, image, current_power_generation):
 
-        return [f(image) for image in data]
+        def f(X):
+            return np.sqrt((current_power_generation + ((X[:, :, 0] @ self.betas[0])+(X[:, :, 1] @ self.betas[1])).T @ (X[:, :, 2] @ self.betas[2]))**2)
+        return f(image)
+
+
+def generate_dates(start_date, n):
+    dates = [start_date]
+    for i in range(1, n):
+        next_date = start_date + pd.Timedelta(minutes=i)
+        dates.append(next_date)
+    return dates
 
 
 class multiday_prediction_model:
@@ -45,21 +63,34 @@ class multiday_prediction_model:
         self.models = models
         self.loss = sum([model.loss for model in self.models])
 
-    def predict(self, X):
-        return np.array([model.predict(X) for model in self.models]).T
+    def predict(self, df):
+
+        X = data_to_input_format([df])
+        current_power_generation = [x[0] for x in df['SolarPower'].tolist()]
+        predictions = []
+
+        for i, image in enumerate(X):
+            start_date = df.index[i]
+            prediction_timestamps = generate_dates(start_date + pd.Timedelta(minutes=1), self.delta)
+            prediction = []
+            for model in self.models:
+                prediction.append(model.predict(image, current_power_generation[i]))
+            prediction=pd.DataFrame(prediction, index=prediction_timestamps)
+            predictions.append(prediction)
+
+        return predictions
 
     def evaluate(self, df: pd.DataFrame, error_measure):
 
-        X, Y = get_evaluation_data(df, self.delta)
+        _, Y = get_evaluation_data(df, self.delta)
 
         xs = []
         ys = []
 
-        for i in range(len(X)):
+        predictions = self.predict(df)
 
-            prediction = self.predict([X[i]])
-
-            xs += list(prediction[0])
+        for i, prediction in enumerate(predictions):
+            xs += prediction.tolist()
             ys += Y[i]
 
         error = error_measure(xs, ys)
@@ -113,65 +144,96 @@ def extract_date_time_from_filenames(folder_path):
     return date_time_tuples
 
 
-def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_name="multiday_model"):
-    def train_model(X, Y):
+def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_name="multiday_model", verbose=False):
+    def train_model(current_power_generation, X, Y):
 
-        def loss_function(beta, X, Y, lambdas, Gammas):
-            n = int(len(beta) / 2)
-
+        def loss_function(beta, current_power_generation, X, Y, lambdas, Gammas):
+            n = len(beta) // 3
             beta1 = beta[:n]
-            beta2 = beta[n:]
+            beta2 = beta[n:2 * n]
+            beta3 = beta[2 * n:]
 
-            # loss = sum([(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)).T@(Y[i] - (X[i][0, :, :]@beta1).T@(X[i][1, :, :]@beta2)) for i in range(len(X))]) + lambdas[0]*beta1.T@Gammas[0]@beta1 + lambdas[1]*beta2.T@Gammas[1]@beta2
-
-            guess = lambda i: abs((X[i][:, :, 0] @ beta1).T @ (X[i][:, :, 1] @ beta2))
+            guess = lambda i: np.sqrt((current_power_generation[i] + ((X[i][:, :, 0] @ beta1)+(X[i][:, :, 1] @ beta2)).T @ (X[i][:, :, 2] @ beta3))**2)
             correction_term_1 = lambdas[0] * beta1.T @ Gammas[0] @ beta1
             correction_term_2 = lambdas[1] * beta2.T @ Gammas[1] @ beta2
-            error_sum = sum([abs(Y[i] - guess(i)) for i in range(len(X))])/len(X)
+            correction_term_3 = lambdas[2] * beta3.T @ Gammas[2] @ beta3
+            error_sum = np.sqrt(sum([(Y[i] - guess(i))**2 for i in range(len(X))])/len(X))
 
-            loss = error_sum #+ correction_term_1 + correction_term_2
+            loss = error_sum + correction_term_1 + correction_term_2 + correction_term_3
 
             return loss
 
+        # Function to track loss during optimization
+        loss_evolution = []
+
+        def callback_loss(x):
+            loss_evolution.append(loss_function(x, current_power_generation, X, Y, lambdas, Gammas))
+
         n = X[0].shape[1]
 
-        lambdas = [0.5, 0.5]
-        Gammas = [np.eye(n), np.eye(n)]
+        gamma = 10**4
+        lambdas = [gamma/3 for _ in range(3)]
+        Gammas = [np.eye(n), np.eye(n), np.eye(n)]
 
-        initial_guess = np.ones(2 * n)
+        initial_guess = np.ones(3 * n)*0.00001
 
         #print("Training model...")
 
         result = minimize(loss_function,
                           initial_guess,
-                          args=(X, Y, lambdas, Gammas),
-                          method='SLSQP')
+                          args=(current_power_generation, X, Y, lambdas, Gammas),
+                          method='SLSQP', #'L-BFGS-B', #'SLSQP',
+                          #tol=1e-6,  # Adjust tolerance
+                          options={'maxiter': 200},
+                          callback=callback_loss)
 
         #print("Model trained!")
+
+        # Plot loss evolution
+        plt.plot(loss_evolution)
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.yscale('log')
+        plt.title('Loss Evolution during Optimization')
+        plt.show()
 
         beta = result.x
         optimal_loss = result.fun
 
-        beta1 = beta[:n]
-        beta2 = beta[n:]
+        print("Loss:", optimal_loss)
 
-        M = model((beta1, beta2), optimal_loss)
+        n = len(beta) // 3
+
+        beta1 = beta[:n]
+        beta2 = beta[n:2 * n]
+        beta3 = beta[2 * n:]
+
+        M = model((beta1, beta2, beta3), optimal_loss)
 
         return M, optimal_loss
 
     models = []
 
+    if verbose:
+        print(f"\n(0/{number_of_timesteps_to_predict}) Training model...")
+
     for i in range(number_of_timesteps_to_predict):
         delta = i + 1
 
         X, Y = get_training_data(data, delta)
+        current_power_generation = []
+        for day in data:
+            current_power_generation += [x[0] for x in day['SolarPower'].tolist()]
 
-        trained_model, _ = train_model(X, Y)
+        trained_model, _ = train_model(current_power_generation, X, Y)
+
+        if verbose:
+            print(f"({i+1}/{number_of_timesteps_to_predict}) Training model...")
 
         models.append(trained_model)
 
 
-    multiday_predictor = multiday_prediction_model(models, delta=number_of_timesteps_to_predict)
+    multiday_predictor = multiday_prediction_model(models=models, delta=number_of_timesteps_to_predict)
 
     if save_to_file:
         try:
@@ -181,6 +243,54 @@ def get_model(data, number_of_timesteps_to_predict, save_to_file=False, model_na
             print(f"Unable to save model to file: {model_name}.pkl!")
 
     return multiday_predictor
+
+
+def pair_images_with_power_data(df: pd.DataFrame,
+                                image_column_name: str,
+                                power_column_name: str):
+
+    # Get the indices of non-NaN elements in the specified column
+    indices = df.index[df[image_column_name].notna()]
+    pairs = []
+    for i, idx in enumerate(indices):
+        try:
+            pairs.append((df[power_column_name].loc[idx:indices[i+1]].tolist(), df[image_column_name].loc[idx]))
+        except:
+            pairs.append((df[power_column_name].loc[idx:].tolist(), df[image_column_name].loc[idx]))
+
+    df = pd.DataFrame(pairs, columns=df.columns)
+    df.index = indices
+    return df
+
+def get_nth_power_after_index(df, n, index, power_column_name):
+    element = None
+    k = 1
+
+    if isinstance(index, int):
+        while True:
+            try:
+                element = df.iloc[index + k-1][power_column_name][n - sum([len(df.iloc[index + i][power_column_name]) for i in range(k-1)])]
+                break
+            except IndexError:
+                if k > df.iloc[index:].shape[0]:
+                    print("Index out of bounds!")
+                    break
+            k += 1
+    elif isinstance(index, pd.Timestamp):
+        while True:
+            try:
+                target_date = index + pd.Timedelta(days=k-1)
+                element = df.loc[target_date, power_column_name][n - sum([len(df.loc[target_date, power_column_name]) for i in range(k-1)])]
+                break
+            except KeyError:
+                if k > df.iloc[index:].shape[0]:
+                    print("Index out of bounds!")
+                    break
+            k += 1
+    else:
+        raise ValueError("Unsupported index type. Only integer and datetime indices are supported.")
+
+    return element
 
 
 def preprocess_and_save_data(file_name="all_days_data"):
@@ -250,16 +360,38 @@ def preprocess_and_save_data(file_name="all_days_data"):
 
     # READ AND SAVE DATA
     all_data = []
+    all_merged_data = []
 
     for filename in os.listdir('data/csv_files'):
         satellite_images = load_satellite_images(f'data/{os.path.splitext(filename)[0]}')
-        solar_power_generation_data = load_solar_power_generation_data(f'data/csv_files/{filename}')
-        all_data.append(
-            pd.merge_asof(satellite_images.sort_index(), solar_power_generation_data.sort_index(), left_index=True,
-                          right_index=True, direction='backward'))
 
+        # Round up the minutes
+        satellite_images.index = satellite_images.index.ceil('min')
+
+        solar_power_generation_data = load_solar_power_generation_data(f'data/csv_files/{filename}')
+
+        # Perform left join
+        merged_data = pd.merge(solar_power_generation_data, satellite_images, left_index=True, right_index=True,
+                               how='left')
+
+        # all_data.append(
+        #     pd.merge_asof(satellite_images.sort_index(), solar_power_generation_data.sort_index(), left_index=True,
+        #                   right_index=True, direction='backward'))
+
+        merged_data = merged_data.sort_values(by='Minutes1UTC', ascending=True)
+
+        all_merged_data.append(merged_data)
+
+
+        all_data.append(pair_images_with_power_data(merged_data,
+                                        image_column_name='Image',
+                                        power_column_name='SolarPower'))
+
+
+    merged_data = daily_data_structure(all_merged_data)
     data = daily_data_structure(all_data)
 
+    save_object(merged_data, "merged_data")
     save_object(data, file_name)
 
 
@@ -313,6 +445,10 @@ def transform_data_to_optical_flow(data):
             if prev_image is not None:
 
                 flow = calculate_optical_flow(prev_image, current_image)
+
+                # Include current sattelite image
+                flow = np.concatenate((flow, current_image[:, :, np.newaxis]), axis=2)
+
                 flow_images.append(optical_flow_image(flow))
 
             else:
@@ -322,7 +458,7 @@ def transform_data_to_optical_flow(data):
 
         day_copy['Image'] = flow_images
         day_copy.rename(columns={'Image': 'flow_images'}, inplace=True)
-        data_optical_flow.append(day_copy)
+        data_optical_flow.append(day_copy.dropna())
 
     return data_optical_flow
 
@@ -392,36 +528,55 @@ def data_to_input_format(data):
     X = []
     for day in data:
 
-        for j in range(day.shape[0] - 1):
-            optical_flow_image = day["flow_images"].iloc[j + 1].to_numpy()
+        for j in range(day.shape[0]):
+            optical_flow_image = day["flow_images"].iloc[j].to_numpy()
             X.append(optical_flow_image)
 
     return X
 
 def get_evaluation_data(df, delta):
 
-    images = df['flow_images'].tolist()  # Convert the Image column to a list
-    power = df['SolarPower'].tolist()  # Convert the Power column to a list
+    X = []
+    Y = []
 
-    power_slices = []
-    image_list = []
+    try:
+        for j in range(df.shape[0] - delta):
+            opt_img = df["flow_images"].iloc[j].to_numpy()
+            idx = df.index[j + 1]
+            y = []
+            for d in range(delta):
+                time_steps = d + 1
+                power_generation = get_nth_power_after_index(df, n=time_steps, index=idx, power_column_name="SolarPower")
+                y.append(power_generation)
+            X.append(opt_img)
+            Y.append(y)
 
-    for i in range(len(images) - (delta + 1)):
-        # Slice the power list from the next index to index + delta
-        power_slice = power[i + 1:i + delta + 1]
-        power_slices.append(power_slice)
-        image_list.append(images[i])
+    except:
+        pass  # just stop when there is no more data left
 
-        # Print for checking - testing purposes
-        # print(f"Image {i}: {type(images[i])}")
-        # print(f"Solar Power for Image {i}: {power_slice}")
-        # print(f"Original solar power for image {i}: {power[i+1:i+delta+1]}\n")
 
-    image_list.pop(0)
-    image_list = [image.to_numpy() for image in image_list]
-    power_slices.pop(0)
+    # images = df['flow_images'].tolist()  # Convert the Image column to a list
+    # power = df['SolarPower'].tolist()  # Convert the Power column to a list
+    #
+    # power_slices = []
+    # image_list = []
+    #
+    # for i in range(len(images) - (delta + 1)):
+    #     # Slice the power list from the next index to index + delta
+    #     power_slice = power[i + 1:i + delta + 1]
+    #     power_slices.append(power_slice)
+    #     image_list.append(images[i])
+    #
+    #     # Print for checking - testing purposes
+    #     # print(f"Image {i}: {type(images[i])}")
+    #     # print(f"Solar Power for Image {i}: {power_slice}")
+    #     # print(f"Original solar power for image {i}: {power[i+1:i+delta+1]}\n")
+    #
+    # image_list.pop(0)
+    # image_list = [image.to_numpy() for image in image_list]
+    # power_slices.pop(0)
 
-    return image_list, power_slices
+    return X, Y
     # Example usage: images, power = get_evaluation_data(training_data[0], 2)
 
 
@@ -456,9 +611,10 @@ def cross_validate(get_model, delta, dfs: list, n_splits=1):
                           number_of_timesteps_to_predict=delta,
                           save_to_file=False,
                           model_name=f"{delta}_time_step_model")
-        evaluation_data = get_evaluation_data(test_data, delta=delta)
         score = model.evaluate(test_data, error_measure=RMSE)
         scores.append(score)
+
+    print("Cross validation scores:", scores)
 
     cross_validation_score = np.mean(scores)
 
@@ -491,15 +647,65 @@ def evaluate_overfitting(get_model, delta, dfs: list, n_splits=1):
 
     print("Cross validation score:", cross_validation_score)
 
-    overfitting_score = np.mean(scores)/cross_validation_score
+    overfitting_score =  (cross_validation_score - np.mean(scores)) / cross_validation_score
 
     return overfitting_score
 
 
 
+def display_predictions(model, df, merged_data, historical_points=10):
+
+    predictions = model.predict(df)
+
+    for i in range(df.shape[0]):
+
+        optical_flow = df["flow_images"].iloc[i].to_numpy()
+
+        start_date = df.index[i] - pd.Timedelta(minutes=historical_points)
+        end_date = df.index[i] + pd.Timedelta(minutes=historical_points)
+
+        truth = merged_data["SolarPower"].loc[start_date:end_date]
+
+        # Extract the X and Y components of the flow
+        U = optical_flow[:, :, 0]  # X components
+        V = optical_flow[:, :, 1]  # Y components
+        magnitude = np.sqrt(U ** 2 + V ** 2)
+
+        # Create a grid of coordinates for the vectors
+        X, Y = np.meshgrid(np.arange(U.shape[1]), np.arange(U.shape[0]))
+
+        # Plot the vector field using quiver
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))  # Create a subplot with 1 row and 2 columns
+
+        ax1.imshow(optical_flow[:, :, 2], cmap='gray')
+        ax1.set_title("Current sky state")
+
+        # Plot the quiver plot on the same axes
+        ax1.quiver(X, Y, U, V,
+                  magnitude,
+                  angles='xy',
+                  scale_units='xy',
+                  scale=1,
+                  cmap='plasma')
+        ax1.axis('equal')  # Keep the scale of x and y equal
+        ax1.set_title('Optical Flow Field')
+
+        # Plot the data in the subplot
+        ax2.plot(predictions[i], marker='.', color='red', label="Prediction")
+        ax2.plot(truth, marker='.', color='blue', label="True data")
+        ax2.axvline(x=df.index[i], color='black', linestyle='--')
+        ax2.set_title(f'Start time: {df.index[i]}')
+        ax2.grid(True)
+        ax2.legend()
+        ax2.set_xlabel('t')
+        ax2.set_ylabel('Solar Power (MW)')
+
+        plt.show()
+
+
 def __main__():
 
-    #preprocess_and_save_data("all_days_data")
+    # preprocess_and_save_data("all_days_data")
 
     data = load_object("all_days_data.pkl")
 
@@ -507,48 +713,88 @@ def __main__():
 
     optical_flow_data = daily_data_structure(optical_flow_data)
 
-    training_data = optical_flow_data.get_days([0, 1, 2, 3, 4])
+    training_data = optical_flow_data.get_days([0])
+
+    merged_data = load_object("merged_data.pkl")
+
+    # # Create the plot
+    # plt.figure(figsize=(10, 5))  # Increase figure size
+    #
+    #
+    # for day in merged_data.all_days:
+    #     date = day.index[100].strftime('%Y-%m-%d')
+    #     plt.plot(day["SolarPower"].to_list(), label=date)
+    #
+    # # # Format the x-axis to display dates better
+    # # plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))  # Change date format
+    # # plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Display a tick every 3 hours
+    # #
+    # # # Rotate date labels for better visibility
+    # # plt.gcf().autofmt_xdate()
+    #
+    # plt.title(f"Solar power generation multiple days")
+    # plt.ylabel("MW")
+    # plt.xlabel("$t$")
+    # plt.legend()
+    # plt.grid(True)
+    # plt.show()
+    #
+    # exit()
+
+
+    #training_data = optical_flow_data.get_days([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     test_data = optical_flow_data.get_days([5])
+
+    # Record the start time using a high-resolution counter
+    start_time = time.perf_counter()
 
     # get_model(data=training_data,
     #           number_of_timesteps_to_predict=5,
     #           save_to_file=True,
-    #           model_name="five_time_step_model")
+    #           model_name="five_time_step_model_NOOVERFIT",
+    #           verbose=True)
+    # Record the end time
+    end_time = time.perf_counter()
+
+    # Calculate elapsed time
+    elapsed_time = end_time - start_time
+
+    print(f"The training took {elapsed_time:.6f} seconds to complete.")
+
+
+    model = load_object("five_time_step_model_NOOVERFIT.pkl")
 
 
 
 
-    model = load_object("five_time_step_model.pkl")
-
-
-    data = optical_flow_data.get_days([0])
-
-    # cross_validation_score = cross_validate(get_model, delta=2, dfs=data, n_splits=8)
+    # data = optical_flow_data.get_days([0])
     #
-    # print("\n\nDONE -------------------------------------\n\n")
+    # # cross_validation_score = cross_validate(get_model, delta=2, dfs=data, n_splits=8)
+    # #
+    # # print("\n\nDONE -------------------------------------\n\n")
+    #
+    # overfitting_score = evaluate_overfitting(get_model, delta=2, dfs=data, n_splits=8)
+    #
+    #
+    # # print("Cross validation score:", cross_validation_score)
+    # print("Overfitting score:", overfitting_score)
+    #
+    #
+    # exit()
+    #
 
-    overfitting_score = evaluate_overfitting(get_model, delta=2, dfs=data, n_splits=8)
 
 
-    # print("Cross validation score:", cross_validation_score)
-    print("Overfitting score:", overfitting_score)
+    display_predictions(model, training_data[0].head(30).tail(7), merged_data.get_days([0])[0])
 
 
     exit()
 
-    dayid = 0
-
-
-    display_optical_flow_image(test_data[dayid]["flow_images"].iloc[1])
-
-    X = data_to_input_format([test_data[dayid].head(2)])
-
-    predictions = model.predict(X)
-
-    print(predictions[0])
     print("\n------------------\n")
-    print(test_data[dayid]["SolarPower"].iloc[2:2+5].tolist())
+    print(test_data[dayid].head(30).tail(2))
     print("Model loss:", model.models[0].loss)
+
+
 
 
 if __name__ == "__main__":
